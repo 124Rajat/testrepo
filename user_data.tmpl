@@ -1,0 +1,97 @@
+#!/bin/bash
+sudo su
+yum update -y
+wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io.key
+yum install -y jenkins
+yum install -y java
+sudo amazon-linux-extras install -y nginx1
+yum install -y jq
+yum install -y git-all
+aws s3 cp s3://${bucket}/nginx.conf  /etc/nginx/
+yum install httpd -y
+cd /etc/httpd/conf
+sed -i 's/Listen 80/Listen 8081/g' httpd.conf
+yum install -y php php-pgsql libapache2-mod-php
+yum install -y postgresql
+service httpd start
+service jenkins start
+service nginx start
+cd /var/www/html
+touch finalwork.php
+echo '<?php ' >> finalwork.php
+echo ' $user=''''`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."username"`'''';' >>   finalwork.php
+echo ' $password=''''`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."password"`'''';' >> finalwork.php
+echo ' $host=''''`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."host"`'''';' >> finalwork.php
+echo ' $port=''''`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."port"`'''';' >> finalwork.php
+echo '$dbname=''''`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."dbname"`'''';' >> finalwork.php
+aws s3 cp s3://${bucket}/stagework.php stagework.php
+cat stagework.php >> finalwork.php
+chkconfig httpd on
+chkconfig jenkins on
+chkconfig nginx on
+cd /var/lib/jenkins
+sudo -u jenkins git config --global credential.helper '!aws codecommit credential-helper $@'
+sudo -u jenkins git config --global credential.useHttpPath true
+sudo -u jenkins git config --global user.email ${email}
+sudo -u jenkins git config --global user.name "MyJenkinsServer"
+cd /var/lib/jenkins
+mkdir liquibase
+cd liquibase
+#wget https://github.com/liquibase/liquibase/releases/download/v3.8.1/liquibase-3.8.1.tar.gz
+wget https://github.com/liquibase/liquibase/releases/download/v4.1.1/liquibase-4.1.1.tar.gz
+tar -xvzf liquibase-4.1.1.tar.gz
+wget https://jdbc.postgresql.org/download/postgresql-42.2.18.jar
+cd ..
+touch LiquibaseRegister.sh
+chmod 777 LiquibaseRegister.sh
+echo 'bash $JENKINS_HOME/liquibase/liquibase registerChangelog --changeLogFile=$1 --hubProjectId= $2 --liquibaseHubApiKey=$3 ' >> LiquibaseRegister.sh
+
+touch callLiquibaseDemoDeployment.sh
+chmod 777 callLiquibaseDemoDeployment.sh
+
+echo 'export lquser=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."username"`' >>   callLiquibaseDemoDeployment.sh
+echo 'export lqpassword=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."password"`' >> callLiquibaseDemoDeployment.sh
+echo 'export hostname=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."host"`' >> callLiquibaseDemoDeployment.sh
+echo 'export portnumber=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."port"`' >> callLiquibaseDemoDeployment.sh
+echo 'export dbname=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."dbname"`' >> callLiquibaseDemoDeployment.sh
+echo 'bash $JENKINS_HOME/liquibase/liquibase --changeLogFile=$1 --url=jdbc:postgresql://$hostname:$portnumber/$dbname --username=$lquser --password=$lqpassword --driver=org.postgresql.Driver --classpath=$JENKINS_HOME/liquibase/postgresql-42.2.18.jar update' >> callLiquibaseDemoDeployment.sh
+
+
+touch callLiquibaseDemoRollback.sh
+chmod 777 callLiquibaseDemoRollback.sh
+echo 'export JENKINS_HOME=/var/lib/jenkins/' >> callLiquibaseDemoRollback.sh
+echo 'export lquser=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."username"`' >> callLiquibaseDemoRollback.sh
+echo 'export lqpassword=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."password"`' >> callLiquibaseDemoRollback.sh
+echo 'export hostname=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."host"`' >> callLiquibaseDemoRollback.sh
+echo 'export portnumber=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."port"`' >> callLiquibaseDemoRollback.sh
+echo 'export dbname=`aws secretsmanager get-secret-value --secret-id ${name} --region ${region}   | jq --raw-output .SecretString | jq -r ."dbname"`' >> callLiquibaseDemoRollback.sh
+echo 'bash $JENKINS_HOME/liquibase/liquibase --changeLogFile=$1 --url=jdbc:postgresql://$hostname:$portnumber/$dbname --username=$lquser --password=$lqpassword --driver=org.postgresql.Driver --classpath=$JENKINS_HOME/liquibase/postgresql-42.2.18.jar rollbackCount $2' >> callLiquibaseDemoRollback.sh
+sleep 30
+
+aws s3 cp s3://${bucket}/jobs/install_jenkins_plugin.sh install_jenkins_plugin.sh
+chmod 777 install_jenkins_plugin.sh
+sudo /etc/init.d/jenkins stop
+./install_jenkins_plugin.sh git
+sleep 30
+sudo ex +g/useSecurity/d +g/authorizationStrategy/d -scwq /var/lib/jenkins/config.xml
+cd /var/lib/jenkins/jobs
+mkdir LiquibaseDeployment
+cd LiquibaseDeployment
+aws s3 cp s3://${bucket}/jobs/deployment.xml config.xml
+cd ..
+chown -R jenkins:jenkins LiquibaseDeployment/
+mkdir LiquibaseRollback
+cd LiquibaseRollback
+aws s3 cp s3://${bucket}/jobs/rollback.xml config.xml
+cd ..
+chown -R jenkins:jenkins LiquibaseRollback/
+mkdir LiquibaseRegister
+cd LiquibaseRegister
+aws s3 cp s3://${bucket}/jobs/rollback.xml config.xml
+cd ..
+chown -R jenkins:jenkins LiquibaseRegister/
+
+sleep 30
+sudo /etc/init.d/jenkins restart
+
